@@ -56,9 +56,9 @@ struct EfiField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct EfiRecord {
-    name: String,
-    fields: Vec<EfiField>,
+enum EfiRecord {
+    EfiStruct { name: String, fields: Vec<EfiField> },
+    EfiUnion { name: String, fields: Vec<EfiField> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -104,16 +104,17 @@ fn write_aux_header<P: AsRef<Path>, Q: AsRef<Path>>(efi_header: P,
     Ok(efi_header_path)
 }
 
-fn type_name(typ: &Type) -> Result<String, String> {
-    typ.get_declaration()
+fn type_name(typ: &Type) -> String {
+    String::from(typ.get_declaration()
         .and_then(|d| d.get_name())
-        .ok_or_else(|| format!("type has no name {:?}", typ))
+        .unwrap_or_else(|| typ.get_display_name())
+        .trim_left_matches('_'))
 }
 
 fn to_efi_type(typ: &Type) -> Result<EfiType, String> {
     match typ.get_kind() {
         TypeKind::Record => {
-            let name = try!(type_name(typ));
+            let name = type_name(typ);
             match name.as_ref() {
                 "efi_status" => Ok(EfiType::Status),
                 "efi_uintn" => Ok(EfiType::UIntN),
@@ -132,22 +133,22 @@ fn to_efi_type(typ: &Type) -> Result<EfiType, String> {
                 _ => Ok(EfiType::Id(name)),
             }
         }
+        TypeKind::Enum => Ok(EfiType::Id(type_name(typ))),
         TypeKind::Pointer => {
             let pointee = &try!(typ.get_pointee_type().ok_or("pointer has not pointee type"));
             let typ = try!(to_efi_type(pointee));
             Ok(EfiType::Ptr(Box::new(typ)))
         }
         TypeKind::Typedef => {
-            let typ = &typ.get_canonical_type();
-            let tname = type_name(typ).unwrap_or_else(|_| typ.get_display_name());
-            Ok(to_efi_type(typ).unwrap_or_else(|_| EfiType::Id(tname)))
+            let ctyp = &typ.get_canonical_type();
+            Ok(to_efi_type(ctyp).unwrap_or_else(|_| EfiType::Id(type_name(typ))))
         }
         _ => Err(String::from(format!("unsupported type {:?}", typ))),
     }
 }
 
 fn to_efi_argdir(typ: &Type) -> Option<EfiArgDir> {
-    typ.get_declaration().and_then(|d| d.get_name()).and_then(|name| {
+    typ.get_canonical_type().get_declaration().and_then(|d| d.get_name()).and_then(|name| {
         match name.as_ref() {
             "efi_arg_in" => Some(EfiArgDir::In),
             "efi_arg_out" => Some(EfiArgDir::Out),
@@ -157,9 +158,10 @@ fn to_efi_argdir(typ: &Type) -> Option<EfiArgDir> {
 }
 
 fn to_efi_argopt(typ: &Type) -> bool {
-    typ.get_declaration()
+    typ.get_canonical_type()
+        .get_declaration()
         .and_then(|d| d.get_name())
-        .and_check(|name| name == "efi_arg_opt")
+        .and_check(|name| name == "efi_arg_optional")
         .is_some()
 }
 
@@ -180,7 +182,6 @@ fn to_efi_method(typ: &Type) -> Result<EfiMethod, String> {
             if let Some(last) = efi_args.last_mut() {
                 last.optional = true;
             }
-
             continue;
         }
 
@@ -221,10 +222,25 @@ fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String
             });
         }
 
-        module.records.push(EfiRecord {
-            name: name,
-            fields: efi_fields,
-        });
+        let kind = try!(typ.get_declaration()
+            .map(|d| d.get_kind())
+            .ok_or("record type without declaration"));
+
+        module.records.push(match kind {
+            EntityKind::StructDecl => {
+                EfiRecord::EfiStruct {
+                    name: name,
+                    fields: efi_fields,
+                }
+            }
+            EntityKind::UnionDecl => {
+                EfiRecord::EfiUnion {
+                    name: name,
+                    fields: efi_fields,
+                }
+            }
+            _ => return Err(String::from(format!("unsupported type {:?}", typ))),
+        })
     }
 
     Ok(())
