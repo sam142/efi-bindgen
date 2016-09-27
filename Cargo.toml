@@ -1,0 +1,8 @@
+[package]
+name = "efi-bindgen"
+version = "0.1.0"
+authors = ["sam <me@sam.st>"]
+
+[dependencies]
+clang = {version = "~0.12", features = ["clang_3_8"]}
+syntex_syntax = "~0.44"
