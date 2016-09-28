@@ -1,5 +1,3 @@
-extern crate clang;
-
 use clang::*;
 use std::io;
 use std::io::prelude::*;
@@ -24,17 +22,17 @@ impl<T> Check<T> for Option<T> {
     }
 }
 
-fn type_name(typ: &Type) -> String {
-    String::from(typ.get_declaration()
+fn type_name(ty: &Type) -> String {
+    String::from(ty.get_declaration()
         .and_then(|d| d.get_name())
-        .unwrap_or_else(|| typ.get_display_name())
+        .unwrap_or_else(|| ty.get_display_name())
         .trim_left_matches('_'))
 }
 
-fn to_efi_type(typ: &Type) -> Result<EfiType, String> {
-    match typ.get_kind() {
+fn to_efi_type(ty: &Type) -> Result<EfiType, String> {
+    match ty.get_kind() {
         TypeKind::Record => {
-            let name = type_name(typ);
+            let name = type_name(ty);
             match name.as_ref() {
                 "efi_status" => Ok(EfiType::Status),
                 "efi_uintn" => Ok(EfiType::UIntN),
@@ -53,22 +51,22 @@ fn to_efi_type(typ: &Type) -> Result<EfiType, String> {
                 _ => Ok(EfiType::Id(name)),
             }
         }
-        TypeKind::Enum => Ok(EfiType::Id(type_name(typ))),
+        TypeKind::Enum => Ok(EfiType::Id(type_name(ty))),
         TypeKind::Pointer => {
-            let pointee = &try!(typ.get_pointee_type().ok_or("pointer has not pointee type"));
-            let typ = try!(to_efi_type(pointee));
-            Ok(EfiType::Ptr(Box::new(typ)))
+            let pointee = &try!(ty.get_pointee_type().ok_or("pointer has not pointee type"));
+            let ty = try!(to_efi_type(pointee));
+            Ok(EfiType::Ptr(Box::new(ty)))
         }
         TypeKind::Typedef => {
-            let ctyp = &typ.get_canonical_type();
-            Ok(to_efi_type(ctyp).unwrap_or_else(|_| EfiType::Id(type_name(typ))))
+            let cty = &ty.get_canonical_type();
+            Ok(to_efi_type(cty).unwrap_or_else(|_| EfiType::Id(type_name(ty))))
         }
-        _ => Err(String::from(format!("unsupported type {:?}", typ))),
+        _ => Err(String::from(format!("unsupported type {:?}", ty))),
     }
 }
 
-fn to_efi_argdir(typ: &Type) -> Option<EfiArgDir> {
-    typ.get_canonical_type().get_declaration().and_then(|d| d.get_name()).and_then(|name| {
+fn to_efi_argdir(ty: &Type) -> Option<EfiArgDir> {
+    ty.get_canonical_type().get_declaration().and_then(|d| d.get_name()).and_then(|name| {
         match name.as_ref() {
             "efi_arg_in" => Some(EfiArgDir::In),
             "efi_arg_out" => Some(EfiArgDir::Out),
@@ -77,17 +75,17 @@ fn to_efi_argdir(typ: &Type) -> Option<EfiArgDir> {
     })
 }
 
-fn to_efi_argopt(typ: &Type) -> bool {
-    typ.get_canonical_type()
+fn to_efi_argopt(ty: &Type) -> bool {
+    ty.get_canonical_type()
         .get_declaration()
         .and_then(|d| d.get_name())
         .and_check(|name| name == "efi_arg_optional")
         .is_some()
 }
 
-fn to_efi_method(typ: &Type) -> Result<EfiMethod, String> {
-    let res = &try!(typ.get_result_type().ok_or("function prototype without result"));
-    let args = try!(typ.get_argument_types().ok_or("function prototype without args"));
+fn to_efi_method(ty: &Type) -> Result<EfiMethod, String> {
+    let res = &try!(ty.get_result_type().ok_or("function prototype without result"));
+    let args = try!(ty.get_argument_types().ok_or("function prototype without args"));
 
     let mut efi_args: Vec<EfiArg> = Vec::new();
     let mut dir = EfiArgDir::In;
@@ -107,7 +105,7 @@ fn to_efi_method(typ: &Type) -> Result<EfiMethod, String> {
 
         efi_args.push(EfiArg {
             name: String::new(),
-            typ: try!(to_efi_type(arg)),
+            ty: try!(to_efi_type(arg)),
             dir: dir,
             optional: false,
         });
@@ -115,7 +113,7 @@ fn to_efi_method(typ: &Type) -> Result<EfiMethod, String> {
 
     Ok(EfiMethod {
         name: String::new(),
-        typ: try!(to_efi_type(res)),
+        ty: try!(to_efi_type(res)),
         args: efi_args,
     })
 }
@@ -130,36 +128,36 @@ fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String
         return Ok(());
     }
 
-    let typ = try!(entity.get_typedef_underlying_type().ok_or("efi typedef without type"));
-    if let Some(fields) = typ.get_canonical_type().get_fields() {
+    let ty = try!(entity.get_typedef_underlying_type().ok_or("efi typedef without type"));
+    if let Some(fields) = ty.get_canonical_type().get_fields() {
         let mut efi_fields = Vec::new();
 
         for ref field in fields {
-            let typ = &try!(field.get_type().ok_or("field without type"));
+            let ty = &try!(field.get_type().ok_or("field without type"));
             efi_fields.push(EfiField {
                 name: try!(field.get_name().ok_or("field without name")),
-                typ: try!(to_efi_type(typ)),
+                ty: try!(to_efi_type(ty)),
             });
         }
 
-        let kind = try!(typ.get_declaration()
+        let kind = try!(ty.get_declaration()
             .map(|d| d.get_kind())
             .ok_or("record type without declaration"));
 
         module.records.push(match kind {
             EntityKind::StructDecl => {
-                EfiRecord::EfiStruct {
+                EfiRecord::Struct {
                     name: name,
                     fields: efi_fields,
                 }
             }
             EntityKind::UnionDecl => {
-                EfiRecord::EfiUnion {
+                EfiRecord::Union {
                     name: name,
                     fields: efi_fields,
                 }
             }
-            _ => return Err(String::from(format!("unsupported type {:?}", typ))),
+            _ => return Err(String::from(format!("unsupported type {:?}", ty))),
         })
     }
 
@@ -197,7 +195,7 @@ fn process_struct(entity: &Entity, module: &mut EfiModule) -> Result<(), String>
 
             if let Some(ref ptype) = ftype.get_canonical_type()
                 .get_pointee_type()
-                .and_check(|typ| typ.get_kind() == TypeKind::FunctionPrototype) {
+                .and_check(|ty| ty.get_kind() == TypeKind::FunctionPrototype) {
                 let decl = &try!(field.get_type()
                     .and_then(|t| t.get_declaration())
                     .ok_or("method lacks declaration"));
@@ -208,7 +206,7 @@ fn process_struct(entity: &Entity, module: &mut EfiModule) -> Result<(), String>
             } else {
                 protocol.fields.push(EfiField {
                     name: name,
-                    typ: try!(to_efi_type(ftype)),
+                    ty: try!(to_efi_type(ftype)),
                 });
             }
         }

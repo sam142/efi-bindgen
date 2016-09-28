@@ -27,7 +27,7 @@ pub enum EfiArgDir {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EfiArg {
     pub name: String,
-    pub typ: EfiType,
+    pub ty: EfiType,
     pub dir: EfiArgDir,
     pub optional: bool,
 }
@@ -35,20 +35,29 @@ pub struct EfiArg {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EfiMethod {
     pub name: String,
-    pub typ: EfiType,
+    pub ty: EfiType,
     pub args: Vec<EfiArg>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EfiField {
     pub name: String,
-    pub typ: EfiType,
+    pub ty: EfiType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EfiRecord {
-    EfiStruct { name: String, fields: Vec<EfiField> },
-    EfiUnion { name: String, fields: Vec<EfiField> },
+    Struct { name: String, fields: Vec<EfiField> },
+    Union { name: String, fields: Vec<EfiField> },
+}
+
+impl EfiRecord {
+    pub fn get_name(&self) -> &str {
+        match *self {
+            EfiRecord::Struct { ref name, .. } => &name[..],
+            EfiRecord::Union { ref name, .. } => &name[..],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
