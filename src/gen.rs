@@ -12,7 +12,7 @@ use syntax::ext::base::{ExtCtxt, DummyResolver};
 use syntax::ext::build::AstBuilder;
 use syntax::ext::expand::ExpansionConfig;
 use syntax::parse::ParseSess;
-use syntax::parse::token::InternedString;
+use syntax::parse::token::{InternedString, fresh_name};
 
 fn gen_cc_name<P: Fn(&str) -> bool>(name: &str, p: P) -> String {
     fn capitalize(s: &str) -> String {
@@ -181,11 +181,15 @@ fn gen_bare_protocol(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
 fn gen_method_sig(cx: &ExtCtxt, method: &EfiMethod) -> MethodSig {
     let args = method.args
         .iter()
-        .skip_while(|&m| m.name == "This")
-        .map(|arg| {
-            cx.arg(DSP,
-                   cx.ident_of(&gen_efisc_name(&arg.name)),
-                   gen_type(cx, &arg.ty, Some(arg.dir)))
+        .map(|a| {
+            if a.name == "This" {
+                cx.arg(DSP, cx.ident_of("self"), cx.ty(DSP, TyKind::ImplicitSelf))
+
+            } else {
+                cx.arg(DSP,
+                       cx.ident_of(&gen_efisc_name(&a.name)),
+                       gen_type(cx, &a.ty, Some(a.dir)))
+            }
         })
         .collect();
 
@@ -198,7 +202,32 @@ fn gen_method_sig(cx: &ExtCtxt, method: &EfiMethod) -> MethodSig {
     }
 }
 
-pub fn gen_protocol_trait(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
+fn gen_getter_sig(cx: &ExtCtxt, field: &EfiField) -> MethodSig {
+    let name = fresh_name(cx.ident_of("'a"));
+    let mut lifetime = Generics::default();
+    lifetime.lifetimes = vec![cx.lifetime_def(DSP, name, vec![])];
+
+    let ty = match field.ty {
+        EfiType::Ptr(ref ty) => {
+            cx.ty_rptr(DSP,
+                       gen_type(cx, ty, Some(EfiArgDir::In)),
+                       Some(cx.lifetime(DSP, name)),
+                       Mutability::Immutable)
+        }
+        ref ty => gen_type(cx, ty, Some(EfiArgDir::In)),
+    };
+
+    MethodSig {
+        unsafety: Unsafety::Normal,
+        constness: dummy_spanned(Constness::NotConst),
+        abi: Abi::Rust,
+        decl: cx.fn_decl(vec![cx.arg(DSP, cx.ident_of("self"), cx.ty(DSP, TyKind::ImplicitSelf))],
+                         ty),
+        generics: lifetime,
+    }
+}
+
+fn gen_protocol_trait(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
     let methods = proto.methods
         .iter()
         .map(|m| {
@@ -209,10 +238,25 @@ pub fn gen_protocol_trait(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
                 node: TraitItemKind::Method(gen_method_sig(cx, m), None),
                 span: DSP,
             }
-        })
-        .collect();
+        });
 
-    let trt = ItemKind::Trait(Unsafety::Normal, Generics::default(), P::new(), methods);
+    let accessors = proto.fields
+        .iter()
+        .map(|f| {
+            TraitItem {
+                id: DID,
+                ident: cx.ident_of(&gen_efisc_name(&f.name)),
+                attrs: vec![],
+                node: TraitItemKind::Method(gen_getter_sig(cx, f), None),
+                span: DSP,
+            }
+        });
+
+    let trt = ItemKind::Trait(Unsafety::Normal,
+                              Generics::default(),
+                              P::new(),
+                              methods.chain(accessors).collect());
+
     cx.item(DSP, cx.ident_of(&gen_trait_name(&proto.name)), vec![], trt)
         .map(|mut i| {
             i.vis = Visibility::Public;
@@ -220,7 +264,7 @@ pub fn gen_protocol_trait(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
         })
 }
 
-pub fn gen_method_block(cx: &ExtCtxt, method: &EfiMethod) -> P<Block> {
+fn gen_method_block(cx: &ExtCtxt, method: &EfiMethod) -> P<Block> {
     let paren = |expr| cx.expr(DSP, ExprKind::Paren(expr));
 
     let args = method.args
@@ -246,21 +290,52 @@ pub fn gen_method_block(cx: &ExtCtxt, method: &EfiMethod) -> P<Block> {
     })))
 }
 
-pub fn gen_protocol_impl(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
+fn gen_getter_block(cx: &ExtCtxt, field: &EfiField) -> P<Block> {
+    let paren = |expr| cx.expr(DSP, ExprKind::Paren(expr));
+
+    let field = cx.expr_field_access(DSP,
+                                     paren(cx.expr_deref(DSP, cx.expr_self(DSP))),
+                                     cx.ident_of(&gen_efisc_name(&field.name)));
+
+    let deref = cx.expr_addr_of(DSP, cx.expr_deref(DSP, field));
+
+
+    cx.block_expr(cx.expr_block(P(Block {
+        stmts: vec![cx.stmt_expr(deref)],
+        id: DID,
+        rules: BlockCheckMode::Unsafe(UnsafeSource::CompilerGenerated),
+        span: DSP,
+    })))
+}
+
+fn gen_protocol_impl(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
     let methods = proto.methods
         .iter()
         .map(|m| {
             ImplItem {
                 id: DID,
                 ident: cx.ident_of(&gen_efisc_name(&m.name)),
-                vis: Visibility::Public,
+                vis: Visibility::Inherited,
                 defaultness: Defaultness::Final,
                 attrs: vec![],
                 node: ImplItemKind::Method(gen_method_sig(cx, m), gen_method_block(cx, m)),
                 span: DSP,
             }
-        })
-        .collect();
+        });
+
+    let accessors = proto.fields
+        .iter()
+        .map(|f| {
+            ImplItem {
+                id: DID,
+                ident: cx.ident_of(&gen_efisc_name(&f.name)),
+                vis: Visibility::Inherited,
+                defaultness: Defaultness::Final,
+                attrs: vec![],
+                node: ImplItemKind::Method(gen_getter_sig(cx, f), gen_getter_block(cx, f)),
+                span: DSP,
+            }
+        });
 
     let trait_ident = cx.ident_of(&gen_trait_name(&proto.name));
     let proto_ident = cx.ident_of(&gen_eficc_name(&proto.name));
@@ -270,13 +345,9 @@ pub fn gen_protocol_impl(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
                              Generics::default(),
                              Some(cx.trait_ref(cx.path_ident(DSP, trait_ident))),
                              ty,
-                             methods);
+                             methods.chain(accessors).collect());
 
     cx.item(DSP, trait_ident, vec![], imp)
-        .map(|mut i| {
-            i.vis = Visibility::Public;
-            i
-        })
 }
 
 pub fn gen_module(module: &EfiModule) -> io::Result<()> {
