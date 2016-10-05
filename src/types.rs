@@ -46,18 +46,23 @@ pub struct EfiField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum EfiRecord {
-    Struct { name: String, fields: Vec<EfiField> },
-    Union { name: String, fields: Vec<EfiField> },
+pub struct Layout {
+    pub size: usize,
+    pub align: usize,
 }
 
-impl EfiRecord {
-    pub fn get_name(&self) -> &str {
-        match *self {
-            EfiRecord::Struct { ref name, .. } => &name[..],
-            EfiRecord::Union { ref name, .. } => &name[..],
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EfiRecordKind {
+    Union,
+    Struct,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EfiRecord {
+    pub name: String,
+    pub fields: Vec<EfiField>,
+    pub layout: Layout,
+    pub kind: EfiRecordKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

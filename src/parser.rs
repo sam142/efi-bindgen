@@ -144,21 +144,19 @@ fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String
             .map(|d| d.get_kind())
             .ok_or("record type without declaration"));
 
-        module.records.push(match kind {
-            EntityKind::StructDecl => {
-                EfiRecord::Struct {
-                    name: name,
-                    fields: efi_fields,
-                }
-            }
-            EntityKind::UnionDecl => {
-                EfiRecord::Union {
-                    name: name,
-                    fields: efi_fields,
-                }
-            }
-            _ => return Err(String::from(format!("unsupported type {:?}", ty))),
-        })
+        module.records.push(EfiRecord {
+            name: name,
+            fields: efi_fields,
+            kind: match kind {
+                EntityKind::StructDecl => EfiRecordKind::Struct,
+                EntityKind::UnionDecl => EfiRecordKind::Union,
+                _ => return Err(String::from(format!("unsupported type {:?}", ty))),
+            },
+            layout: Layout {
+                size: try!(ty.get_sizeof()),
+                align: try!(ty.get_alignof()),
+            },
+        });
     }
 
     Ok(())
@@ -189,6 +187,7 @@ fn process_struct(entity: &Entity, module: &mut EfiModule) -> Result<(), String>
         let fields = try!(entity.get_type()
             .and_then(|t| t.get_fields())
             .ok_or("protocol definition without fields"));
+
         for ref field in fields {
             let name = try!(field.get_name().ok_or("field lacks name"));
             let ftype = &try!(field.get_type().ok_or("protocol field lacks type"));

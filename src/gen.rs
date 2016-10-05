@@ -1,118 +1,306 @@
 use types::*;
+use std::io;
 use syntax::ast::*;
-use syntax::parse::token;
-use syntax::codemap::DUMMY_SP;
+use syntax::ast::DUMMY_NODE_ID as DID;
+use syntax::abi::Abi;
+use syntax::codemap::dummy_spanned;
+use syntax::codemap::DUMMY_SP as DSP;
 use syntax::ptr::P;
 use syntax::print::pprust;
-use syntax::print::pp::eof;
+use syntax::print::pp;
+use syntax::ext::base::{ExtCtxt, DummyResolver};
+use syntax::ext::build::AstBuilder;
+use syntax::ext::expand::ExpansionConfig;
+use syntax::parse::ParseSess;
+use syntax::parse::token::InternedString;
 
-fn gen_ident<S: Into<String>>(name: S) -> Ident {
-    Ident::with_empty_ctxt(token::intern(&name.into()))
+fn gen_cc_name<P: Fn(&str) -> bool>(name: &str, p: P) -> String {
+    fn capitalize(s: &str) -> String {
+        let mut res = String::with_capacity(s.len());
+        let mut chars = s.chars();
+
+        res.extend(chars.by_ref().take(1).flat_map(|c| c.to_uppercase()));
+        res.extend(chars.flat_map(|c| c.to_lowercase()));
+        res
+    }
+
+    name.split('_').filter(|s| p(s)).map(|s| capitalize(s)).collect()
 }
 
-fn mk_type<S: Into<String>>(global: bool, segment: S) -> P<Ty> {
-    let segments = PathSegment {
-        identifier: gen_ident(segment),
-        parameters: PathParameters::AngleBracketed(AngleBracketedParameterData {
-            lifetimes: Vec::new(),
-            types: P::new(),
-            bindings: P::new(),
-        }),
-    };
-
-    let node = TyKind::Path(None,
-                            Path {
-                                span: DUMMY_SP,
-                                global: global,
-                                segments: vec![segments],
-                            });
-
-    P(Ty {
-        id: DUMMY_NODE_ID,
-        node: node,
-        span: DUMMY_SP,
-    })
+fn gen_eficc_name(name: &str) -> String {
+    gen_cc_name(name, |s| s != "EFI" && s != "PROTOCOL")
 }
 
-fn gen_type(ty: &EfiType) -> P<Ty> {
+fn gen_trait_name(name: &str) -> String {
+    gen_cc_name(name, |s| s != "EFI")
+}
+
+fn gen_efisc_name(name: &str) -> String {
+    let mut sc_name = String::with_capacity(name.len());
+    let mut chars = name.chars();
+    sc_name.extend(chars.by_ref().take(1).flat_map(|c| c.to_lowercase()));
+
+    for c in chars {
+        if c.is_uppercase() {
+            sc_name.push('_');
+            sc_name.extend(c.to_lowercase());
+        } else {
+            sc_name.push(c);
+        }
+    }
+
+    sc_name
+}
+
+fn gen_repr_c(cx: &ExtCtxt) -> Attribute {
+    cx.attribute(DSP,
+                 cx.meta_list(DSP,
+                              InternedString::new("repr"),
+                              vec![cx.meta_list_item_word(DSP, InternedString::new("C"))]))
+}
+
+fn gen_std_derive(cx: &ExtCtxt) -> Attribute {
+    cx.attribute(DSP,
+                 cx.meta_list(DSP,
+                              InternedString::new("derive"),
+                              vec![cx.meta_list_item_word(DSP, InternedString::new("Copy")),
+                                   cx.meta_list_item_word(DSP, InternedString::new("Clone")),
+                                   cx.meta_list_item_word(DSP, InternedString::new("Debug"))]))
+}
+
+fn gen_type(cx: &ExtCtxt, ty: &EfiType, dir: Option<EfiArgDir>) -> P<Ty> {
     match *ty {
-        EfiType::Status => mk_type(false, "u64"),
-        EfiType::UIntN => mk_type(false, "u64"),
-        EfiType::IntN => mk_type(false, "i64"),
-        EfiType::Bool => mk_type(false, "bool"),
-        EfiType::Int8 => mk_type(false, "i8"),
-        EfiType::UInt8 => mk_type(false, "u8"),
-        EfiType::Int16 => mk_type(false, "i16"),
-        EfiType::UInt16 => mk_type(false, "u16"),
-        EfiType::Int32 => mk_type(false, "i32"),
-        EfiType::UInt32 => mk_type(false, "u32"),
-        EfiType::Int64 => mk_type(false, "i64"),
-        EfiType::UInt64 => mk_type(false, "u64"),
-        EfiType::Char8 => mk_type(false, "u8"),
-        EfiType::Char16 => mk_type(false, "u16"),
-        EfiType::Id(ref name) => mk_type(false, &name[..]),
+        EfiType::Status => cx.ty_ident(DSP, cx.ident_of("u64")),
+        EfiType::UIntN => cx.ty_ident(DSP, cx.ident_of("u64")),
+        EfiType::IntN => cx.ty_ident(DSP, cx.ident_of("i64")),
+        EfiType::Bool => cx.ty_ident(DSP, cx.ident_of("bool")),
+        EfiType::Int8 => cx.ty_ident(DSP, cx.ident_of("i8")),
+        EfiType::UInt8 => cx.ty_ident(DSP, cx.ident_of("u8")),
+        EfiType::Int16 => cx.ty_ident(DSP, cx.ident_of("i16")),
+        EfiType::UInt16 => cx.ty_ident(DSP, cx.ident_of("u16")),
+        EfiType::Int32 => cx.ty_ident(DSP, cx.ident_of("i32")),
+        EfiType::UInt32 => cx.ty_ident(DSP, cx.ident_of("u32")),
+        EfiType::Int64 => cx.ty_ident(DSP, cx.ident_of("i64")),
+        EfiType::UInt64 => cx.ty_ident(DSP, cx.ident_of("u64")),
+        EfiType::Char8 => cx.ty_ident(DSP, cx.ident_of("u8")),
+        EfiType::Char16 => cx.ty_ident(DSP, cx.ident_of("u16")),
+        EfiType::Id(ref name) => cx.ty_ident(DSP, cx.ident_of(&gen_eficc_name(&name))),
         EfiType::Ptr(ref ty) => {
-            P(Ty {
-                id: DUMMY_NODE_ID,
-                node: TyKind::Ptr(MutTy {
-                    ty: gen_type(&*ty),
-                    mutbl: Mutability::Immutable,
-                }),
-                span: DUMMY_SP,
-            })
+            let mutbl = match dir {
+                Some(EfiArgDir::In) => Mutability::Immutable,
+                Some(EfiArgDir::Out) |
+                None => Mutability::Mutable,
+            };
+            cx.ty_ptr(DSP, gen_type(cx, &*ty, dir), mutbl)
         }
     }
 }
 
-fn gen_struct_fields(fields: &Vec<EfiField>) -> Vec<StructField> {
-    fields.iter()
-        .map(|field| {
-            StructField {
-                span: DUMMY_SP,
-                ident: Some(gen_ident(&field.name[..])),
-                vis: Visibility::Public,
-                id: DUMMY_NODE_ID,
-                ty: gen_type(&field.ty),
-                attrs: Vec::new(),
-            }
-        })
-        .collect()
-}
-
-fn gen_record(record: &EfiRecord) -> VariantData {
-    match *record {
-        EfiRecord::Struct { ref fields, .. } => {
-            VariantData::Struct(gen_struct_fields(fields), DUMMY_NODE_ID)
-        }
-        EfiRecord::Union { .. } => panic!("unions not yet supported"),
+fn gen_field(cx: &ExtCtxt, field: &EfiField) -> StructField {
+    StructField {
+        span: DSP,
+        ident: Some(cx.ident_of(&gen_efisc_name(&field.name))),
+        vis: Visibility::Public,
+        id: DID,
+        ty: gen_type(cx, &field.ty, None),
+        attrs: Vec::new(),
     }
 }
 
-pub fn gen_module(module: &EfiModule) {
-    println!("{:?}", module);
+// FIXME: handle union and enum
+fn gen_record(cx: &ExtCtxt, record: &EfiRecord) -> P<Item> {
+    if record.kind != EfiRecordKind::Struct {
+        panic!("{:?} are currently not supported", record.kind);
+    }
 
-    let records = module.records
+    let fields = record.fields
         .iter()
-        .map(|r| {
-            P(Item {
-                ident: gen_ident(r.get_name()),
-                attrs: Vec::new(),
-                id: DUMMY_NODE_ID,
-                node: ItemKind::Struct(gen_record(r), Generics::default()),
-                vis: Visibility::Public,
-                span: DUMMY_SP,
-            })
+        .map(|f| gen_field(cx, f))
+        .collect();
+
+    cx.item_struct(DSP,
+                     cx.ident_of(&gen_eficc_name(&record.name)),
+                     VariantData::Struct(fields, DID))
+        .map(|mut s| {
+            s.attrs = vec![gen_repr_c(cx), gen_std_derive(cx)];
+            s.vis = Visibility::Public;
+            s
+        })
+}
+
+fn gen_bare_method(cx: &ExtCtxt, method: &EfiMethod) -> StructField {
+    let args = method.args
+        .iter()
+        .map(|arg| {
+            cx.arg(DSP,
+                   cx.ident_of(&gen_efisc_name(&arg.name)),
+                   gen_type(cx, &arg.ty, Some(arg.dir)))
         })
         .collect();
 
-    let module = Mod {
-        inner: DUMMY_SP,
-        items: records,
+    let ty = Ty {
+        id: DID,
+        node: TyKind::BareFn(P(BareFnTy {
+            unsafety: Unsafety::Unsafe,
+            abi: Abi::Win64,
+            lifetimes: vec![],
+            decl: cx.fn_decl(args, gen_type(cx, &method.ty, None)),
+        })),
+        span: DSP,
     };
 
-    let mut ps = pprust::rust_printer(Box::new(::std::io::stdout()));
-    ps.print_mod(&module, &[]);
-    ps.print_remaining_comments();
-    eof(&mut ps.s);
-    ps.s.out.flush();
+    StructField {
+        span: DSP,
+        ident: Some(cx.ident_of(&gen_efisc_name(&method.name))),
+        vis: Visibility::Public,
+        id: DID,
+        ty: P(ty),
+        attrs: Vec::new(),
+    }
+}
+
+// FIXME: method/field order
+fn gen_bare_protocol(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
+    let methods = proto.methods.iter().map(|m| gen_bare_method(cx, m));
+    let fields = proto.fields.iter().map(|f| gen_field(cx, f));
+    let entries = methods.chain(fields).map(|mut f| {
+        f.vis = Visibility::Inherited;
+        f
+    });
+
+    cx.item_struct(DSP,
+                     cx.ident_of(&gen_eficc_name(&proto.name)),
+                     VariantData::Struct(entries.collect(), DID))
+        .map(|mut s| {
+            s.attrs = vec![gen_repr_c(cx)];
+            s.vis = Visibility::Public;
+            s
+        })
+}
+
+fn gen_method_sig(cx: &ExtCtxt, method: &EfiMethod) -> MethodSig {
+    let args = method.args
+        .iter()
+        .skip_while(|&m| m.name == "This")
+        .map(|arg| {
+            cx.arg(DSP,
+                   cx.ident_of(&gen_efisc_name(&arg.name)),
+                   gen_type(cx, &arg.ty, Some(arg.dir)))
+        })
+        .collect();
+
+    MethodSig {
+        unsafety: Unsafety::Normal,
+        constness: dummy_spanned(Constness::NotConst),
+        abi: Abi::Rust,
+        decl: cx.fn_decl(args, gen_type(cx, &method.ty, None)),
+        generics: Generics::default(),
+    }
+}
+
+pub fn gen_protocol_trait(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
+    let methods = proto.methods
+        .iter()
+        .map(|m| {
+            TraitItem {
+                id: DID,
+                ident: cx.ident_of(&gen_efisc_name(&m.name)),
+                attrs: vec![],
+                node: TraitItemKind::Method(gen_method_sig(cx, m), None),
+                span: DSP,
+            }
+        })
+        .collect();
+
+    let trt = ItemKind::Trait(Unsafety::Normal, Generics::default(), P::new(), methods);
+    cx.item(DSP, cx.ident_of(&gen_trait_name(&proto.name)), vec![], trt)
+        .map(|mut i| {
+            i.vis = Visibility::Public;
+            i
+        })
+}
+
+pub fn gen_method_block(cx: &ExtCtxt, method: &EfiMethod) -> P<Block> {
+    let paren = |expr| cx.expr(DSP, ExprKind::Paren(expr));
+
+    let args = method.args
+        .iter()
+        .map(|a| if a.name == "This" {
+            cx.expr_self(DSP)
+        } else {
+            cx.expr_ident(DSP, cx.ident_of(&gen_efisc_name(&a.name)))
+        })
+        .collect();
+
+    let field = cx.expr_field_access(DSP,
+                                     paren(cx.expr_deref(DSP, cx.expr_self(DSP))),
+                                     cx.ident_of(&gen_efisc_name(&method.name)));
+
+    let call = cx.expr_call(DSP, paren(field), args);
+
+    cx.block_expr(cx.expr_block(P(Block {
+        stmts: vec![cx.stmt_expr(call)],
+        id: DID,
+        rules: BlockCheckMode::Unsafe(UnsafeSource::CompilerGenerated),
+        span: DSP,
+    })))
+}
+
+pub fn gen_protocol_impl(cx: &ExtCtxt, proto: &EfiProtocol) -> P<Item> {
+    let methods = proto.methods
+        .iter()
+        .map(|m| {
+            ImplItem {
+                id: DID,
+                ident: cx.ident_of(&gen_efisc_name(&m.name)),
+                vis: Visibility::Public,
+                defaultness: Defaultness::Final,
+                attrs: vec![],
+                node: ImplItemKind::Method(gen_method_sig(cx, m), gen_method_block(cx, m)),
+                span: DSP,
+            }
+        })
+        .collect();
+
+    let trait_ident = cx.ident_of(&gen_trait_name(&proto.name));
+    let proto_ident = cx.ident_of(&gen_eficc_name(&proto.name));
+    let ty = cx.ty_ptr(DSP, cx.ty_ident(DSP, proto_ident), Mutability::Immutable);
+    let imp = ItemKind::Impl(Unsafety::Normal,
+                             ImplPolarity::Positive,
+                             Generics::default(),
+                             Some(cx.trait_ref(cx.path_ident(DSP, trait_ident))),
+                             ty,
+                             methods);
+
+    cx.item(DSP, trait_ident, vec![], imp)
+        .map(|mut i| {
+            i.vis = Visibility::Public;
+            i
+        })
+}
+
+pub fn gen_module(module: &EfiModule) -> io::Result<()> {
+    let sess = &ParseSess::new();
+    let mut ml = DummyResolver;
+    let cx = ExtCtxt::new(sess,
+                          vec![],
+                          ExpansionConfig::default("efi".into()),
+                          &mut ml);
+
+    let records = module.records.iter().map(|r| gen_record(&cx, r));
+    let protos = module.protocols.iter().map(|p| gen_bare_protocol(&cx, p));
+    let traits = module.protocols.iter().map(|p| gen_protocol_trait(&cx, p));
+    let impls = module.protocols.iter().map(|p| gen_protocol_impl(&cx, p));
+    let module = Mod {
+        inner: DSP,
+        items: records.chain(protos).chain(traits).chain(impls).collect(),
+    };
+
+    let mut ps = pprust::rust_printer(Box::from(io::stdout()));
+    ps.s = pp::mk_printer(Box::from(io::stdout()), 100);
+    try!(ps.print_mod(&module, &[]));
+    try!(ps.print_remaining_comments());
+    try!(pp::eof(&mut ps.s));
+    try!(ps.s.out.flush());
+    Ok(())
 }

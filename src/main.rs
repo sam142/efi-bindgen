@@ -13,8 +13,7 @@ mod gen;
 
 fn main() {
     let efi_header = std::env::args().nth(1).expect("No EFI header specified!");
-    match parse(&efi_header) {
-        Err(e) => println!("{}", e.description()),
-        Ok(module) => gen_module(&module),
+    if let Err(e) = parse(&efi_header).and_then(|module| gen_module(&module).map_err(Box::from)) {
+        println!("{}", e.description())
     }
 }
