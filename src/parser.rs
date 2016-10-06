@@ -118,6 +118,24 @@ fn to_efi_method(ty: &Type) -> Result<EfiMethod, String> {
     })
 }
 
+fn process_enum_decls(entity: &Entity, enm: &mut EfiEnum) -> Result<(), String> {
+    if entity.get_kind() == EntityKind::EnumConstantDecl {
+        enm.fields.push(EfiVariant {
+            name: try!(entity.get_name().ok_or("enum variant has no name")),
+            value: match entity.get_enum_constant_value() {
+                None => None,
+                Some((_, val)) => Some(val),
+            },
+        });
+    }
+
+    for ref child in entity.get_children() {
+        try!(process_enum_decls(child, enm));
+    }
+
+    Ok(())
+}
+
 fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String> {
     let name = try!(entity.get_name().ok_or("typedef without name"));
 
@@ -129,7 +147,8 @@ fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String
     }
 
     let ty = try!(entity.get_typedef_underlying_type().ok_or("efi typedef without type"));
-    if let Some(fields) = ty.get_canonical_type().get_fields() {
+    let cty = ty.get_canonical_type();
+    if let Some(fields) = cty.get_fields() {
         let mut efi_fields = Vec::new();
 
         for ref field in fields {
@@ -152,11 +171,15 @@ fn process_typedef(entity: &Entity, module: &mut EfiModule) -> Result<(), String
                 EntityKind::UnionDecl => EfiRecordKind::Union,
                 _ => return Err(String::from(format!("unsupported type {:?}", ty))),
             },
-            layout: Layout {
-                size: try!(ty.get_sizeof()),
-                align: try!(ty.get_alignof()),
-            },
         });
+    } else if cty.get_kind() == TypeKind::Enum {
+        let mut enm = EfiEnum {
+            name: name,
+            fields: Vec::new(),
+        };
+        let decl = try!(ty.get_declaration().ok_or("enum without declaration"));
+        try!(process_enum_decls(&decl, &mut enm));
+        module.enums.push(enm);
     }
 
     Ok(())
@@ -178,8 +201,14 @@ fn process_method_args(entity: &Entity, args: &mut Iterator<Item = &mut EfiArg>)
 fn process_struct(entity: &Entity, module: &mut EfiModule) -> Result<(), String> {
     if let Some(name) = entity.get_name()
         .and_check(|n| n.starts_with("_EFI") && n.ends_with("PROTOCOL")) {
+        let name = &name[1..];
+
+        if module.protocols.iter().any(|m| m.name == name) {
+            return Ok(());
+        }
+
         let mut protocol = EfiProtocol {
-            name: String::from(&name[1..]),
+            name: String::from(name),
             methods: Vec::new(),
             fields: Vec::new(),
         };
@@ -257,6 +286,7 @@ pub fn parse(efi_header: &str) -> Result<EfiModule, Box<Error>> {
     let mut proto = EfiModule {
         protocols: Vec::new(),
         records: Vec::new(),
+        enums: Vec::new(),
     };
 
     try!(process_tu(&tu.get_entity(), &efi_header, &mut proto));

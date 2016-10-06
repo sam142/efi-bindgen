@@ -59,13 +59,13 @@ fn gen_repr_c(cx: &ExtCtxt) -> Attribute {
                               vec![cx.meta_list_item_word(DSP, InternedString::new("C"))]))
 }
 
-fn gen_std_derive(cx: &ExtCtxt) -> Attribute {
+fn gen_derive(cx: &ExtCtxt, traits: &[&'static str]) -> Attribute {
     cx.attribute(DSP,
                  cx.meta_list(DSP,
                               InternedString::new("derive"),
-                              vec![cx.meta_list_item_word(DSP, InternedString::new("Copy")),
-                                   cx.meta_list_item_word(DSP, InternedString::new("Clone")),
-                                   cx.meta_list_item_word(DSP, InternedString::new("Debug"))]))
+                              traits.iter()
+                                  .map(|t| cx.meta_list_item_word(DSP, InternedString::new(t)))
+                                  .collect()))
 }
 
 fn gen_type(cx: &ExtCtxt, ty: &EfiType, dir: Option<EfiArgDir>) -> P<Ty> {
@@ -107,24 +107,47 @@ fn gen_field(cx: &ExtCtxt, field: &EfiField) -> StructField {
     }
 }
 
-// FIXME: handle union and enum
 fn gen_record(cx: &ExtCtxt, record: &EfiRecord) -> P<Item> {
-    if record.kind != EfiRecordKind::Struct {
-        panic!("{:?} are currently not supported", record.kind);
-    }
+    let fields = VariantData::Struct(record.fields
+                                         .iter()
+                                         .map(|f| gen_field(cx, f))
+                                         .collect(),
+                                     DID);
 
-    let fields = record.fields
+    P(Item {
+        ident: cx.ident_of(&gen_eficc_name(&record.name)),
+        attrs: vec![gen_repr_c(cx),
+                    match record.kind {
+                        EfiRecordKind::Struct => gen_derive(cx, &["Copy", "Clone", "Debug"]),
+                        EfiRecordKind::Union => gen_derive(cx, &["Copy", "Clone"]),
+                    }],
+        id: DID,
+        node: match record.kind {
+            EfiRecordKind::Struct => ItemKind::Struct(fields, Generics::default()),
+            EfiRecordKind::Union => ItemKind::Union(fields, Generics::default()),
+        },
+        vis: Visibility::Public,
+        span: DSP,
+    })
+}
+
+fn gen_enum(cx: &ExtCtxt, enm: &EfiEnum) -> P<Item> {
+    let gen_lit = |v| cx.expr_lit(DSP, LitKind::Int(v, LitIntType::Unsuffixed));
+
+    let vs = enm.fields
         .iter()
-        .map(|f| gen_field(cx, f))
+        .map(|f| {
+            let mut v = cx.variant(DSP, cx.ident_of(&f.name), vec![]);
+            v.node.disr_expr = f.value.map(&gen_lit);
+            v
+        })
         .collect();
 
-    cx.item_struct(DSP,
-                     cx.ident_of(&gen_eficc_name(&record.name)),
-                     VariantData::Struct(fields, DID))
-        .map(|mut s| {
-            s.attrs = vec![gen_repr_c(cx), gen_std_derive(cx)];
-            s.vis = Visibility::Public;
-            s
+    cx.item_enum(DSP, cx.ident_of(&enm.name), EnumDef { variants: vs })
+        .map(|mut e| {
+            e.attrs = vec![gen_repr_c(cx), gen_derive(cx, &["Copy", "Clone", "Debug"])];
+            e.vis = Visibility::Public;
+            e
         })
 }
 
@@ -359,12 +382,13 @@ pub fn gen_module(module: &EfiModule) -> io::Result<()> {
                           &mut ml);
 
     let records = module.records.iter().map(|r| gen_record(&cx, r));
+    let enums = module.enums.iter().map(|r| gen_enum(&cx, r));
     let protos = module.protocols.iter().map(|p| gen_bare_protocol(&cx, p));
     let traits = module.protocols.iter().map(|p| gen_protocol_trait(&cx, p));
     let impls = module.protocols.iter().map(|p| gen_protocol_impl(&cx, p));
     let module = Mod {
         inner: DSP,
-        items: records.chain(protos).chain(traits).chain(impls).collect(),
+        items: records.chain(enums).chain(protos).chain(traits).chain(impls).collect(),
     };
 
     let mut ps = pprust::rust_printer(Box::from(io::stdout()));
